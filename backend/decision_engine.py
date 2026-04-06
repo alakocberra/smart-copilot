@@ -15,7 +15,6 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
-from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
 
 
@@ -242,13 +241,13 @@ def run_rule_based(reading: SensorReading) -> tuple[AlertLevel, ScenarioType, Ac
 class MLEngine:
     """
     K-Means ile operasyonel durum kümeleme.
-    Linear Regression ile kısa vadeli trend tahmini.
+    Rolling Average ile trend yönü tahmini (artıyor / azalıyor / stabil).
+    Sayısal tahmin yerine anlamlı yön + ETA bilgisi döner.
     """
     def __init__(self, n_clusters: int = 4):
         self.n_clusters = n_clusters
         self.kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
         self.scaler = StandardScaler()
-        self.regressors: dict[str, LinearRegression] = {}
         self.fitted = False
         self.cluster_labels = {
             0: "Optimal Koşullar",
@@ -256,31 +255,21 @@ class MLEngine:
             2: "Kuraklık Stresi",
             3: "Kritik Durum",
         }
+        # Son N okumayı tutan pencere (rolling average için)
+        self._window: list[dict] = []
+        self.window_size = 10
 
     def fit(self, df: pd.DataFrame):
-        """Geçmiş veriyle modeli eğit."""
+        """Geçmiş veriyle K-Means modelini eğit."""
         features = df[["temperature", "humidity", "water_level"]].values
         scaled = self.scaler.fit_transform(features)
         self.kmeans.fit(scaled)
-
-        # Her sensör için bağımsız trend regresörü
-        for col in ["temperature", "humidity", "water_level"]:
-            X = np.arange(len(df)).reshape(-1, 1)
-            y = df[col].values
-            reg = LinearRegression()
-            reg.fit(X, y)
-            self.regressors[col] = reg
-
         self.fitted = True
         self._assign_cluster_semantics(df)
 
     def _assign_cluster_semantics(self, df: pd.DataFrame):
         """Küme merkezlerini analiz ederek anlamlı isim ata."""
-        features = df[["temperature", "humidity", "water_level"]].values
-        scaled = self.scaler.transform(features)
         centers = self.scaler.inverse_transform(self.kmeans.cluster_centers_)
-
-        # Merkezlere göre otomatik etiketleme
         for i, center in enumerate(centers):
             temp, hum, wl = center[0], center[1], center[2]
             if temp > 38:
@@ -294,25 +283,80 @@ class MLEngine:
             else:
                 self.cluster_labels[i] = "Stresli / Geçiş"
 
-    def predict(self, reading: SensorReading, history_window: int = 10) -> dict:
-        """Mevcut okuma için küme ve 30 dakikalık trend tahmin et."""
+    def _calculate_trend(self, values: list[float], label: str) -> dict:
+        """
+        Son N okumadan trend yönü ve eşiğe tahmini süre hesapla.
+        Sayısal tahmin yerine anlamlı yön + ETA bilgisi döner.
+        """
+        if len(values) < 3:
+            return {"direction": "belirsiz", "rate_per_reading": 0.0,
+                    "current": round(values[-1], 1) if values else 0,
+                    "eta_to_critical": "Yeterli veri yok"}
+
+        mid = len(values) // 2
+        recent_avg = sum(values[mid:]) / len(values[mid:])
+        older_avg  = sum(values[:mid]) / len(values[:mid])
+        rate = recent_avg - older_avg
+
+        thresholds = {
+            "temperature": {"critical": 38.0, "direction": "up"},
+            "humidity":    {"critical": 20.0, "direction": "down"},
+            "water_level": {"critical": 10.0, "direction": "down"},
+        }
+
+        current = values[-1]
+        t = thresholds.get(label, {})
+
+        if abs(rate) < 0.3:   direction = "stabil"
+        elif rate > 0:         direction = "artıyor"
+        else:                  direction = "azalıyor"
+
+        eta = "Kritik eşik riski yok"
+        if t and abs(rate) > 0.1:
+            critical = t["critical"]
+            if t["direction"] == "up" and direction == "artıyor" and current < critical:
+                steps = abs((critical - current) / rate)
+                eta = f"~{int(steps * 5)} dakikada kritik eşiğe ulaşabilir"
+            elif t["direction"] == "down" and direction == "azalıyor" and current > critical:
+                steps = abs((current - critical) / abs(rate))
+                eta = f"~{int(steps * 5)} dakikada kritik eşiğe ulaşabilir"
+
+        return {
+            "direction": direction,
+            "rate_per_reading": round(rate, 2),
+            "current": round(current, 1),
+            "eta_to_critical": eta,
+        }
+
+    def predict(self, reading: SensorReading) -> dict:
+        """Mevcut okuma için küme ve trend yönü hesapla."""
         if not self.fitted:
             return {"cluster": None, "cluster_label": "Model eğitilmedi", "trend": None}
 
+        # Pencereye ekle
+        self._window.append({
+            "temperature": reading.temperature,
+            "humidity":    reading.humidity,
+            "water_level": reading.water_level,
+        })
+        if len(self._window) > self.window_size:
+            self._window.pop(0)
+
+        # K-Means küme tahmini
         features = np.array([[reading.temperature, reading.humidity, reading.water_level]])
         scaled = self.scaler.transform(features)
         cluster_id = int(self.kmeans.predict(scaled)[0])
 
-        # Trend: 30 dk sonra tahmini değerler (6 okuma ilerisi, 5 dk aralıklı varsayımı)
+        # Her sensör için trend
         trend = {}
-        for col, reg in self.regressors.items():
-            next_step = np.array([[history_window + 6]])
-            trend[col] = round(float(reg.predict(next_step)[0]), 2)
+        for col in ["temperature", "humidity", "water_level"]:
+            values = [r[col] for r in self._window]
+            trend[col] = self._calculate_trend(values, col)
 
         return {
             "cluster": cluster_id,
             "cluster_label": self.cluster_labels.get(cluster_id, "Bilinmiyor"),
-            "trend_30min": trend,
+            "trend": trend,
         }
 
 
@@ -430,7 +474,7 @@ class HybridDecisionEngine:
         alert, scenario, actuator, flags, confidence = run_rule_based(reading)
 
         # PHASE 2: ML
-        ml_result = self.ml_engine.predict(reading, len(self._history))
+        ml_result = self.ml_engine.predict(reading)
 
         # Literatür seçimi
         literature = LITERATURE.get(scenario.value.lower(), LITERATURE["normal"])
@@ -461,7 +505,7 @@ class HybridDecisionEngine:
             actuator_command=actuator.to_dict(),
             rule_based_flags=flags,
             ml_cluster=ml_result.get("cluster"),
-            ml_trend=ml_result.get("trend_30min"),
+            ml_trend=ml_result.get("trend"),
             xai_explanation=None,   # async decide_with_xai() ile doldurulur
             literature_refs=literature,
             user_action_required=(alert in [AlertLevel.CRITICAL, AlertLevel.EMERGENCY]),
