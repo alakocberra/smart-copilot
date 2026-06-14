@@ -1,15 +1,15 @@
 """
 Smart Co-Pilot — Hybrid Decision Engine
 ========================================
-Mimari: Rule-Based (Phase 1) → ML Clustering (Phase 2) → Gemini XAI (Phase 3)
+Mimari: Rule-Based (Phase 1) → ML Clustering (Phase 2) → Optimization (Phase 3)
 Çıktı: FastAPI-ready JSON — Dashboard ve gerçek donanımla plug-and-play uyumlu.
 """
 
 import json
-import os
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from datetime import datetime
 from enum import Enum
+from itertools import product
 from typing import Optional
 
 import numpy as np
@@ -18,42 +18,46 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
 
-# ──────────────────────────────────────────────
-# 1. ENUM & DATACLASS TANIMLARI
-# ──────────────────────────────────────────────
-
 class AlertLevel(str, Enum):
-    OK       = "OK"
-    WARNING  = "WARNING"
+    OK = "OK"
+    WARNING = "WARNING"
     CRITICAL = "CRITICAL"
     EMERGENCY = "EMERGENCY"
 
 
 class ScenarioType(str, Enum):
-    NORMAL   = "NORMAL"
+    NORMAL = "NORMAL"
     HEATWAVE = "HEATWAVE"
-    DROUGHT  = "DROUGHT"
+    DROUGHT = "DROUGHT"
+    COLD_STRESS = "COLD_STRESS"
     HARDWARE_FAULT = "HARDWARE_FAULT"
+
+
+ALERT_SEVERITY = {
+    AlertLevel.OK: 0,
+    AlertLevel.WARNING: 1,
+    AlertLevel.CRITICAL: 2,
+    AlertLevel.EMERGENCY: 3,
+}
 
 
 @dataclass
 class SensorReading:
-    """Ham sensör verisi — IoT cihazından veya simülasyondan gelir."""
     timestamp: str
-    temperature: float          # °C
-    humidity: float             # %
-    water_level: float          # % (0-100)
-    nitrogen: int               # ppm (N)
-    phosphorus: int             # ppm (P)
-    potassium: int              # ppm (K)
-    fan_on: int = 0             # 0/1
-    watering_pump_on: int = 0   # 0/1
-    water_pump_on: int = 0      # 0/1
+    temperature: float
+    humidity: float
+    water_level: float
+    nitrogen: int
+    phosphorus: int
+    potassium: int
+    plant_type: str = "lettuce"
+    fan_on: int = 0
+    watering_pump_on: int = 0
+    water_pump_on: int = 0
 
 
 @dataclass
 class ActuatorCommand:
-    """Sistemin verdiği aktüatör komutu."""
     fan: bool = False
     watering_pump: bool = False
     water_pump: bool = False
@@ -68,7 +72,6 @@ class ActuatorCommand:
 
 @dataclass
 class DecisionResult:
-    """Decision Engine'in tam çıktısı — FastAPI'den dönen JSON budur."""
     timestamp: str
     alert_level: AlertLevel
     scenario: ScenarioType
@@ -77,10 +80,12 @@ class DecisionResult:
     rule_based_flags: list[str]
     ml_cluster: Optional[int]
     ml_trend: Optional[dict]
-    xai_explanation: Optional[str]
+    optimization: Optional[dict]
+    decision_comment: str
+    user_view: dict
     literature_refs: list[str]
     user_action_required: bool
-    confidence_score: float         # 0.0 – 1.0
+    confidence_score: float
 
     def to_json(self):
         d = asdict(self)
@@ -89,29 +94,42 @@ class DecisionResult:
         return json.dumps(d, ensure_ascii=False, indent=2)
 
 
-# ──────────────────────────────────────────────
-# 2. PHASE 1 — RULE-BASED ENGINE
-# ──────────────────────────────────────────────
-
-# Bitki eşik değerleri (dikey tarım, yaprak yeşillikleri için genel aralıklar)
-# Kaynak: Pereira et al. (2025), Kozai et al. (2022)
 THRESHOLDS = {
-    "temp_ok":          (15.0, 30.0),   # °C — optimal büyüme bandı
-    "temp_warn_high":   30.0,           # °C — uyarı başlangıcı
-    "temp_critical":    38.0,           # °C — kritik stres
-    "temp_emergency":   42.0,           # °C — ölüm riski
-    "temp_warn_low":    10.0,           # °C — soğuk stresi
-    "temp_critical_low": 5.0,           # °C — dondurma riski
-
-    "humidity_ok":      (50.0, 75.0),   # % — VPD optimumu
+    "temp_ok": (15.0, 30.0),
+    "temp_warn_high": 30.0,
+    "temp_critical": 38.0,
+    "temp_emergency": 42.0,
+    "temp_warn_low": 10.0,
+    "temp_critical_low": 5.0,
+    "humidity_ok": (50.0, 75.0),
     "humidity_warn_low": 40.0,
     "humidity_critical_low": 20.0,
     "humidity_warn_high": 80.0,
-
-    "water_level_ok":   50.0,           # % — minimum güvenli seviye
+    "water_level_ok": 50.0,
     "water_level_warn": 30.0,
     "water_level_critical": 10.0,
-    "water_level_empty": 2.0,           # % — pompa koruma eşiği
+    "water_level_empty": 2.0,
+}
+
+PLANT_PROFILES = {
+    "lettuce": {
+        "label": "Marul",
+        "temp_warn_high": 30.0,
+        "humidity_warn_low": 40.0,
+        "water_level_warn": 30.0,
+    },
+    "basil": {
+        "label": "Fesleğen",
+        "temp_warn_high": 32.0,
+        "humidity_warn_low": 42.0,
+        "water_level_warn": 32.0,
+    },
+    "spinach": {
+        "label": "Ispanak",
+        "temp_warn_high": 28.0,
+        "humidity_warn_low": 45.0,
+        "water_level_warn": 34.0,
+    },
 }
 
 LITERATURE = {
@@ -125,6 +143,10 @@ LITERATURE = {
         "Pereira et al. (2025) — Hybrid DSS for Smart Agriculture, MDPI Sensors",
         "Savvas & Gruda (2018) — Hydroponic and Aeroponic Systems, Scientia Horticulturae",
     ],
+    "cold_stress": [
+        "Kozai et al. (2022) — Plant Factory: An Indoor Vertical Farming System",
+        "Pereira et al. (2025) — Hybrid DSS for Smart Agriculture, MDPI Sensors",
+    ],
     "hardware_fault": [
         "Gubbi et al. (2013) — IoT for Smart Cities: Vision & Challenges, Future Generation CS",
         "Pereira et al. (2025) — Hybrid DSS for Smart Agriculture, MDPI Sensors",
@@ -135,98 +157,91 @@ LITERATURE = {
 }
 
 
+def _raise_alert(current: AlertLevel, target: AlertLevel) -> AlertLevel:
+    if ALERT_SEVERITY[target] > ALERT_SEVERITY[current]:
+        return target
+    return current
+
+
+def _thresholds_for_plant(plant_type: str) -> dict:
+    profile = PLANT_PROFILES.get(plant_type, PLANT_PROFILES["lettuce"])
+    th = dict(THRESHOLDS)
+    th["temp_warn_high"] = profile["temp_warn_high"]
+    th["humidity_warn_low"] = profile["humidity_warn_low"]
+    th["water_level_warn"] = profile["water_level_warn"]
+    return th
+
+
 def run_rule_based(reading: SensorReading) -> tuple[AlertLevel, ScenarioType, ActuatorCommand, list[str], float]:
-    """
-    Deterministik kural motoru.
-    Dönüş: (alert_level, scenario, actuator_command, flags, confidence)
-    """
     flags = []
     alert = AlertLevel.OK
     scenario = ScenarioType.NORMAL
     cmd = ActuatorCommand()
-    confidence = 1.0  # Rule-based her zaman %100 güvenilir
+    confidence = 1.0
 
-    t  = reading.temperature
-    h  = reading.humidity
+    th = _thresholds_for_plant(reading.plant_type)
+    t = reading.temperature
+    h = reading.humidity
     wl = reading.water_level
 
-    # ── SICAKLIK KURALLARI ──────────────────────────
-    if t >= THRESHOLDS["temp_emergency"]:
+    if t >= th["temp_emergency"]:
         flags.append(f"EMERGENCY: Sıcaklık {t}°C — Bitki ölüm riski!")
         alert = AlertLevel.EMERGENCY
         scenario = ScenarioType.HEATWAVE
         cmd.fan = True
-
-    elif t >= THRESHOLDS["temp_critical"]:
+    elif t >= th["temp_critical"]:
         flags.append(f"CRITICAL: Sıcaklık {t}°C — Kritik ısı stresi")
         alert = AlertLevel.CRITICAL
         scenario = ScenarioType.HEATWAVE
         cmd.fan = True
-
-    elif t >= THRESHOLDS["temp_warn_high"]:
-        flags.append(f"WARNING: Sıcaklık {t}°C — Optimal aralık aşıldı (15-30°C)")
+    elif t >= th["temp_warn_high"]:
+        flags.append(f"WARNING: Sıcaklık {t}°C — Optimal aralık aşıldı")
         alert = AlertLevel.WARNING
         cmd.fan = True
-
-    elif t <= THRESHOLDS["temp_critical_low"]:
+    elif t <= th["temp_critical_low"]:
         flags.append(f"CRITICAL: Sıcaklık {t}°C — Dondurma riski!")
         alert = AlertLevel.CRITICAL
-        scenario = ScenarioType.DROUGHT  # Soğuk-kuru senaryo
-
-    elif t <= THRESHOLDS["temp_warn_low"]:
+        scenario = ScenarioType.COLD_STRESS
+    elif t <= th["temp_warn_low"]:
         flags.append(f"WARNING: Sıcaklık {t}°C — Soğuk stresi başlıyor")
-        if alert == AlertLevel.OK:
-            alert = AlertLevel.WARNING
+        alert = _raise_alert(alert, AlertLevel.WARNING)
+        scenario = ScenarioType.COLD_STRESS
 
-    # ── NEM KURALLARI ───────────────────────────────
-    if h <= THRESHOLDS["humidity_critical_low"]:
+    if h <= th["humidity_critical_low"]:
         flags.append(f"CRITICAL: Nem %{h} — Ciddi kuraklık stresi (VPD çok yüksek)")
-        if alert.value < AlertLevel.CRITICAL.value:
-            alert = AlertLevel.CRITICAL
+        alert = _raise_alert(alert, AlertLevel.CRITICAL)
         scenario = ScenarioType.DROUGHT
         cmd.watering_pump = True
-
-    elif h <= THRESHOLDS["humidity_warn_low"]:
+    elif h <= th["humidity_warn_low"]:
         flags.append(f"WARNING: Nem %{h} — Düşük nem, VPD optimal değil")
-        if alert == AlertLevel.OK:
-            alert = AlertLevel.WARNING
+        alert = _raise_alert(alert, AlertLevel.WARNING)
+        scenario = ScenarioType.DROUGHT if scenario == ScenarioType.NORMAL else scenario
         cmd.watering_pump = True
-
-    elif h >= THRESHOLDS["humidity_warn_high"]:
+    elif h >= th["humidity_warn_high"]:
         flags.append(f"WARNING: Nem %{h} — Aşırı nem, hastalık riski")
-        if alert == AlertLevel.OK:
-            alert = AlertLevel.WARNING
-        cmd.fan = True  # Fanla nem düşür
+        alert = _raise_alert(alert, AlertLevel.WARNING)
+        cmd.fan = True
 
-    # ── SU SEVİYESİ KURALLARI ───────────────────────
-    if wl <= THRESHOLDS["water_level_empty"]:
+    if wl <= th["water_level_empty"]:
         flags.append(f"EMERGENCY: Su seviyesi %{wl} — Pompa koruması devrede, sulama DURDU")
         alert = AlertLevel.EMERGENCY
         scenario = ScenarioType.DROUGHT
-        cmd.watering_pump = False   # Kuru çalışmayı önle
+        cmd.watering_pump = False
         cmd.water_pump = False
-        confidence = 1.0
-
-    elif wl <= THRESHOLDS["water_level_critical"]:
+    elif wl <= th["water_level_critical"]:
         flags.append(f"CRITICAL: Su seviyesi %{wl} — Tank neredeyse boş")
-        if alert.value not in [AlertLevel.EMERGENCY.value]:
-            alert = AlertLevel.CRITICAL
+        alert = _raise_alert(alert, AlertLevel.CRITICAL)
         scenario = ScenarioType.DROUGHT
-        cmd.water_pump = True   # Harici su kaynağından doldur
-
-    elif wl <= THRESHOLDS["water_level_warn"]:
+        cmd.water_pump = True
+    elif wl <= th["water_level_warn"]:
         flags.append(f"WARNING: Su seviyesi %{wl} — Yenileme önerisi")
-        if alert == AlertLevel.OK:
-            alert = AlertLevel.WARNING
+        alert = _raise_alert(alert, AlertLevel.WARNING)
 
-    # ── DONANIM ARIZASI TESPİTİ ─────────────────────
-    # Sulama pompası açık ama nem artmıyorsa → Arıza
-    if reading.watering_pump_on == 1 and h <= THRESHOLDS["humidity_warn_low"]:
+    if reading.watering_pump_on == 1 and h <= th["humidity_warn_low"]:
         flags.append("FAULT DETECTED: Sulama pompası açık ama nem artmıyor — Olası boru/pompa arızası!")
         scenario = ScenarioType.HARDWARE_FAULT
-        if alert.value not in [AlertLevel.EMERGENCY.value]:
-            alert = AlertLevel.CRITICAL
-        confidence = 0.75  # Belirsizlik var
+        alert = _raise_alert(alert, AlertLevel.CRITICAL)
+        confidence = 0.75
 
     if not flags:
         flags.append("OK: Tüm parametreler normal aralıkta")
@@ -234,16 +249,7 @@ def run_rule_based(reading: SensorReading) -> tuple[AlertLevel, ScenarioType, Ac
     return alert, scenario, cmd, flags, confidence
 
 
-# ──────────────────────────────────────────────
-# 3. PHASE 2 — ML ENGINE (K-Means + Regresyon)
-# ──────────────────────────────────────────────
-
 class MLEngine:
-    """
-    K-Means ile operasyonel durum kümeleme.
-    Rolling Average ile trend yönü tahmini (artıyor / azalıyor / stabil).
-    Sayısal tahmin yerine anlamlı yön + ETA bilgisi döner.
-    """
     def __init__(self, n_clusters: int = 4):
         self.n_clusters = n_clusters
         self.kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
@@ -255,20 +261,17 @@ class MLEngine:
             2: "Kuraklık Stresi",
             3: "Kritik Durum",
         }
-        # Son N okumayı tutan pencere (rolling average için)
         self._window: list[dict] = []
         self.window_size = 10
 
     def fit(self, df: pd.DataFrame):
-        """Geçmiş veriyle K-Means modelini eğit."""
         features = df[["temperature", "humidity", "water_level"]].values
         scaled = self.scaler.fit_transform(features)
         self.kmeans.fit(scaled)
         self.fitted = True
-        self._assign_cluster_semantics(df)
+        self._assign_cluster_semantics()
 
-    def _assign_cluster_semantics(self, df: pd.DataFrame):
-        """Küme merkezlerini analiz ederek anlamlı isim ata."""
+    def _assign_cluster_semantics(self):
         centers = self.scaler.inverse_transform(self.kmeans.cluster_centers_)
         for i, center in enumerate(centers):
             temp, hum, wl = center[0], center[1], center[2]
@@ -284,32 +287,34 @@ class MLEngine:
                 self.cluster_labels[i] = "Stresli / Geçiş"
 
     def _calculate_trend(self, values: list[float], label: str) -> dict:
-        """
-        Son N okumadan trend yönü ve eşiğe tahmini süre hesapla.
-        Sayısal tahmin yerine anlamlı yön + ETA bilgisi döner.
-        """
         if len(values) < 3:
-            return {"direction": "belirsiz", "rate_per_reading": 0.0,
-                    "current": round(values[-1], 1) if values else 0,
-                    "eta_to_critical": "Yeterli veri yok"}
+            return {
+                "direction": "belirsiz",
+                "rate_per_reading": 0.0,
+                "current": round(values[-1], 1) if values else 0,
+                "eta_to_critical": "Yeterli veri yok",
+            }
 
         mid = len(values) // 2
         recent_avg = sum(values[mid:]) / len(values[mid:])
-        older_avg  = sum(values[:mid]) / len(values[:mid])
+        older_avg = sum(values[:mid]) / len(values[:mid])
         rate = recent_avg - older_avg
 
         thresholds = {
             "temperature": {"critical": 38.0, "direction": "up"},
-            "humidity":    {"critical": 20.0, "direction": "down"},
+            "humidity": {"critical": 20.0, "direction": "down"},
             "water_level": {"critical": 10.0, "direction": "down"},
         }
 
         current = values[-1]
         t = thresholds.get(label, {})
 
-        if abs(rate) < 0.3:   direction = "stabil"
-        elif rate > 0:         direction = "artıyor"
-        else:                  direction = "azalıyor"
+        if abs(rate) < 0.3:
+            direction = "stabil"
+        elif rate > 0:
+            direction = "artıyor"
+        else:
+            direction = "azalıyor"
 
         eta = "Kritik eşik riski yok"
         if t and abs(rate) > 0.1:
@@ -329,25 +334,23 @@ class MLEngine:
         }
 
     def predict(self, reading: SensorReading) -> dict:
-        """Mevcut okuma için küme ve trend yönü hesapla."""
         if not self.fitted:
             return {"cluster": None, "cluster_label": "Model eğitilmedi", "trend": None}
 
-        # Pencereye ekle
-        self._window.append({
-            "temperature": reading.temperature,
-            "humidity":    reading.humidity,
-            "water_level": reading.water_level,
-        })
+        self._window.append(
+            {
+                "temperature": reading.temperature,
+                "humidity": reading.humidity,
+                "water_level": reading.water_level,
+            }
+        )
         if len(self._window) > self.window_size:
             self._window.pop(0)
 
-        # K-Means küme tahmini
         features = np.array([[reading.temperature, reading.humidity, reading.water_level]])
         scaled = self.scaler.transform(features)
         cluster_id = int(self.kmeans.predict(scaled)[0])
 
-        # Her sensör için trend
         trend = {}
         for col in ["temperature", "humidity", "water_level"]:
             values = [r[col] for r in self._window]
@@ -360,98 +363,436 @@ class MLEngine:
         }
 
 
-# ──────────────────────────────────────────────
-# 4. PHASE 3 — GEMINI XAI KATMANI
-# ──────────────────────────────────────────────
-
-def build_gemini_prompt(reading: SensorReading, alert: AlertLevel,
-                         scenario: ScenarioType, flags: list[str],
-                         actuator: ActuatorCommand, trend: Optional[dict],
-                         literature: list[str]) -> str:
-    """Gemini API için yapılandırılmış Agronomist Persona prompt'u oluşturur."""
-
-    refs_text = "\n".join(f"  - {r}" for r in literature)
-    trend_text = json.dumps(trend, ensure_ascii=False) if trend else "Trend verisi mevcut değil"
-    actuator_text = json.dumps(actuator.to_dict(), ensure_ascii=False)
-
-    return f"""Sen, kentsel dikey tarım konusunda uzmanlaşmış bir agronomistsın (tarım bilimcisi).
-Görevin, teknik sensör verilerini çiftçi/kullanıcı için açık, güven veren ve akademik temelli bir dille açıklamak.
-Kullanıcı sistemin neden bu kararı aldığını anlamalı — sadece ne yapacağını değil.
-
-## MEVCUT SENSÖR DURUMU
-- Sıcaklık: {reading.temperature}°C
-- Nem: {reading.humidity}%
-- Su Seviyesi: {reading.water_level}%
-- Azot (N): {reading.nitrogen} | Fosfor (P): {reading.phosphorus} | Potasyum (K): {reading.potassium}
-
-## UYARI DURUMU: {alert.value}
-## SENARYO: {scenario.value}
-
-## TESPIT EDİLEN SORUNLAR
-{chr(10).join(f'• {f}' for f in flags)}
-
-## ÖNERİLEN AKTÜATÖR KOMUTLARI
-{actuator_text}
-
-## 30 DAKİKA SONRASI TAHMİN
-{trend_text}
-
-## KULLANILACAK LİTERATÜR
-{refs_text}
-
-## GÖREVİN
-1. Mevcut durumu 2-3 cümleyle sade Türkçeyle açıkla (teknik jargon yok).
-2. Neden bu aktüatör komutlarının verildiğini, yukarıdaki literatüre atıfla açıkla.
-3. 30 dakikalık trende göre kullanıcının dikkat etmesi gereken bir sonraki adımı belirt.
-4. Sonunda "⚠️ Kullanıcı Onayı Gerekli:" başlığıyla kısa bir özet sun.
-
-Yanıtın maksimum 200 kelime olsun. Samimi, güven veren, ama asla panik yaratmayan bir ton kullan."""
+def _estimate_next_state(reading: SensorReading, cmd: ActuatorCommand) -> dict:
+    temp = reading.temperature - (1.2 if cmd.fan else 0.0) + (0.2 if not cmd.fan and reading.temperature > 32 else 0.0)
+    # What-if model calibration:
+    # Sulama kısa vadede nemi anlamlı toparlar; fan etkisi nemi azaltır ama baskın olmamalı.
+    humidity = reading.humidity + (3.5 if cmd.watering_pump else 0.0) - (0.8 if cmd.fan else 0.0)
+    # Sulama tank seviyesini düşürür ancak her adımda aşırı tüketim varsayımı yapılmaz.
+    water_level = reading.water_level - (0.8 if cmd.watering_pump else 0.0) + (3.0 if cmd.water_pump else 0.0)
+    return {
+        "temperature": max(-10.0, min(60.0, temp)),
+        "humidity": max(0.0, min(100.0, humidity)),
+        "water_level": max(0.0, min(100.0, water_level)),
+    }
 
 
-async def call_gemini_xai(prompt: str, api_key: str) -> str:
+def _safety_penalty(next_state: dict, th: dict) -> float:
+    penalty = 0.0
+    penalty += max(0.0, next_state["temperature"] - th["temp_warn_high"]) * 1.4
+    penalty += max(0.0, th["temp_warn_low"] - next_state["temperature"]) * 1.4
+    penalty += max(0.0, th["humidity_warn_low"] - next_state["humidity"]) * 1.1
+    penalty += max(0.0, next_state["humidity"] - th["humidity_warn_high"]) * 0.7
+    penalty += max(0.0, th["water_level_warn"] - next_state["water_level"]) * 1.2
+    return penalty
+
+
+def optimize_actuator_plan(
+    reading: SensorReading,
+    base_command: ActuatorCommand,
+    alert: AlertLevel,
+    scenario: ScenarioType,
+) -> dict:
     """
-    Gemini 1.5 Flash API çağrısı.
-    api_key: Ortam değişkeninden (GEMINI_API_KEY) okunur.
+    Phase 4 optimization layer.
+
+    Objective function (minimize):
+      J = w_safety*Risk + w_energy*Energy + w_water*WaterUse + w_switch*SwitchCost + w_user*ManualLoad
+
+    Brute-force over 2^3 actuator combinations with hard safety constraints.
     """
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        response = model.generate_content(prompt)
-        return response.text
-    except ImportError:
-        return "[XAI] google-generativeai paketi yüklü değil. pip install google-generativeai"
-    except Exception as e:
-        return f"[XAI] Gemini API hatası: {str(e)}"
+    weights = {
+        "safety": 5.0,
+        "energy": 1.1,
+        "water": 0.7,
+        "switch": 0.6,
+        "user": 0.8,
+    }
+    th = _thresholds_for_plant(reading.plant_type)
+
+    base = base_command.to_dict()
+    best = None
+
+    for fan, watering_pump, water_pump in product([False, True], repeat=3):
+        cmd = ActuatorCommand(fan=fan, watering_pump=watering_pump, water_pump=water_pump)
+
+        if reading.water_level <= th["water_level_empty"] and (watering_pump or water_pump):
+            continue
+        if reading.temperature >= th["temp_critical"] and not fan:
+            continue
+        if reading.humidity <= th["humidity_critical_low"] and not watering_pump:
+            continue
+
+        next_state = _estimate_next_state(reading, cmd)
+        risk = _safety_penalty(next_state, th)
+        energy = 1.0 * fan + 1.2 * watering_pump + 1.4 * water_pump
+        water_use = 1.5 * watering_pump + 0.8 * water_pump
+        switch_cost = float(base["fan"] != fan) + float(base["watering_pump"] != watering_pump) + float(base["water_pump"] != water_pump)
+        manual_load = 1.0 if (ALERT_SEVERITY[alert] >= 2 and not fan and reading.temperature > th["temp_warn_high"]) else 0.0
+
+        objective = (
+            weights["safety"] * risk
+            + weights["energy"] * energy
+            + weights["water"] * water_use
+            + weights["switch"] * switch_cost
+            + weights["user"] * manual_load
+        )
+
+        row = {
+            "command": cmd.to_dict(),
+            "objective": round(objective, 3),
+            "components": {
+                "risk": round(risk, 3),
+                "energy": round(energy, 3),
+                "water_use": round(water_use, 3),
+                "switch_cost": round(switch_cost, 3),
+                "manual_load": round(manual_load, 3),
+            },
+            "predicted_next_state": {k: round(v, 2) for k, v in next_state.items()},
+        }
+
+        if best is None or row["objective"] < best["objective"]:
+            best = row
+
+    if best is None:
+        best = {
+            "command": base,
+            "objective": 999.0,
+            "components": {
+                "risk": 999.0,
+                "energy": 0.0,
+                "water_use": 0.0,
+                "switch_cost": 0.0,
+                "manual_load": 0.0,
+            },
+            "predicted_next_state": {
+                "temperature": reading.temperature,
+                "humidity": reading.humidity,
+                "water_level": reading.water_level,
+            },
+        }
+
+    return {
+        "objective_function": "Güvenlik riski, enerji, su kullanımı ve anahtarlama maliyeti dengelenerek en uygun komut seçilir.",
+        "scenario": scenario.value,
+        "plant_type": reading.plant_type,
+        "plant_label": PLANT_PROFILES.get(reading.plant_type, PLANT_PROFILES["lettuce"])["label"],
+        "recommended_command": best["command"],
+        "objective_score": best["objective"],
+        "cost_breakdown": best["components"],
+        "predicted_next_state": best["predicted_next_state"],
+    }
 
 
-# ──────────────────────────────────────────────
-# 5. ANA ORKESTRATÖR — HybridDecisionEngine
-# ──────────────────────────────────────────────
+def _friendly_actuator_name(key: str) -> str:
+    mapping = {
+        "fan": "fan",
+        "watering_pump": "sulama pompası",
+        "water_pump": "su doldurma pompası",
+    }
+    return mapping.get(key, key)
+
+
+def _delta_to_phrase(delta: float, metric: str) -> str:
+    if abs(delta) < 0.1:
+        return f"{metric} neredeyse sabit kalır"
+    if delta > 0:
+        return f"{metric} biraz artar"
+    return f"{metric} biraz azalır"
+
+
+def _humanize_flag_text(flag: str) -> str:
+    cleaned = flag
+    for prefix in ("EMERGENCY:", "CRITICAL:", "WARNING:", "FAULT DETECTED:"):
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix):].strip()
+    return cleaned
+
+
+def _what_if_warnings(reading: SensorReading, cmd: ActuatorCommand) -> list[str]:
+    current_alert, current_scenario, _, _, _ = run_rule_based(reading)
+    warnings = []
+
+    if current_scenario == ScenarioType.COLD_STRESS and cmd.fan:
+        warnings.append("Soğuk stresinde fan açmak ortamı daha da soğutabilir ve toparlanmayı geciktirebilir.")
+    if current_scenario == ScenarioType.DROUGHT and cmd.fan and not cmd.watering_pump:
+        warnings.append("Kuraklık riskinde fan tek başına nemi daha da düşürebilir.")
+    if current_scenario == ScenarioType.DROUGHT and cmd.watering_pump and not cmd.water_pump and reading.water_level <= _thresholds_for_plant(reading.plant_type)["water_level_warn"]:
+        warnings.append("Sulama pompası açıkken su takviyesi kapalıysa tank seviyesi daha hızlı düşebilir.")
+    if current_scenario == ScenarioType.HEATWAVE and not cmd.fan and ALERT_SEVERITY[current_alert] >= 2:
+        warnings.append("Isı stresinde fan kapalı kalırsa sıcaklık güvenli aralığa daha yavaş döner.")
+
+    return warnings
+
+
+def build_decision_comment(
+    reading: SensorReading,
+    alert: AlertLevel,
+    scenario: ScenarioType,
+    flags: list[str],
+    actuator: ActuatorCommand,
+    trend: Optional[dict],
+    optimization: Optional[dict],
+) -> str:
+    """Yalnızca rule-based + decision engine çıktısıyla sade yorum üretir."""
+    severity_text = {
+        AlertLevel.OK: "Bitkilerin durumu dengeli görünüyor.",
+        AlertLevel.WARNING: "Bitkilerde küçük dengesizlikler var, erken müdahale iyi olur.",
+        AlertLevel.CRITICAL: "Bitkiler stres altında, hızlı müdahale gerekiyor.",
+        AlertLevel.EMERGENCY: "Acil risk var, sistemi hemen kontrol etmelisin.",
+    }
+    scenario_text = {
+        ScenarioType.NORMAL: "Normal çalışma",
+        ScenarioType.HEATWAVE: "Isı stresi",
+        ScenarioType.DROUGHT: "Kuraklık riski",
+        ScenarioType.COLD_STRESS: "Soğuk stresi",
+        ScenarioType.HARDWARE_FAULT: "Donanım arızası şüphesi",
+    }
+    active_cmd = [_friendly_actuator_name(k) for k, v in actuator.to_dict().items() if v]
+    command_text = ", ".join(active_cmd) if active_cmd else "şu an ek bir cihaz açmaya gerek yok"
+
+    trend_alerts = []
+    if trend:
+        for label, data in trend.items():
+            eta = data.get("eta_to_critical", "")
+            if "dakikada kritik eşiğe ulaşabilir" in eta:
+                metric_name = {
+                    "temperature": "Sıcaklık",
+                    "humidity": "Nem",
+                    "water_level": "Su seviyesi",
+                }.get(label, label)
+                trend_alerts.append(f"{metric_name} için {eta}")
+    trend_text = "; ".join(trend_alerts) if trend_alerts else "Kısa vadede kritik bir kötüleşme sinyali yok."
+
+    opt_text = "Tahmini etki bilgisi henüz oluşmadı."
+    if optimization:
+        ns = optimization.get("predicted_next_state", {})
+        t_delta = float(ns.get("temperature", reading.temperature)) - reading.temperature
+        h_delta = float(ns.get("humidity", reading.humidity)) - reading.humidity
+        wl_delta = float(ns.get("water_level", reading.water_level)) - reading.water_level
+        opt_text = (
+            f"Bu ayarla {_delta_to_phrase(t_delta, 'sıcaklık')}, "
+            f"{_delta_to_phrase(h_delta, 'nem')} ve {_delta_to_phrase(wl_delta, 'su seviyesi')}."
+        )
+
+    approval = "Bu adım için kullanıcı onayı gerekli." if alert in (AlertLevel.CRITICAL, AlertLevel.EMERGENCY) else "İstersen bu ayarı uygulayabilirsin."
+    scenario_label = scenario_text.get(scenario, scenario.value)
+    issue_text = " • ".join(_humanize_flag_text(f) for f in flags[:2]) if flags else "Özel bir alarm yok."
+
+    return (
+        f"{severity_text[alert]} Şu anki durum: {scenario_label}. "
+        f"Önerilen müdahale: {command_text}. "
+        f"Gözlenen sorunlar: {issue_text}. Trend: {trend_text}. "
+        f"{opt_text} {approval}"
+    )
+
+
+def build_user_view(
+    reading: SensorReading,
+    alert: AlertLevel,
+    scenario: ScenarioType,
+    actuator: ActuatorCommand,
+    optimization: Optional[dict],
+    comment: str,
+) -> dict:
+    status_map = {
+        AlertLevel.OK: "İyi",
+        AlertLevel.WARNING: "Dikkat",
+        AlertLevel.CRITICAL: "Kritik",
+        AlertLevel.EMERGENCY: "Acil",
+    }
+    scenario_map = {
+        ScenarioType.NORMAL: "Normal denge",
+        ScenarioType.HEATWAVE: "Isı stresi",
+        ScenarioType.DROUGHT: "Kuraklık riski",
+        ScenarioType.COLD_STRESS: "Soğuk stresi",
+        ScenarioType.HARDWARE_FAULT: "Donanım arızası şüphesi",
+    }
+    action_recommendations = []
+    if actuator.watering_pump:
+        action_recommendations.append(
+            {
+                "priority": 1,
+                "type": "watering",
+                "title": "Sulamayı başlat",
+                "detail": "Kök bölgesindeki kuruma riskini azaltmak için sulama aktif olmalı.",
+                "icon": "watering-plant",
+            }
+        )
+    if actuator.fan:
+        action_recommendations.append(
+            {
+                "priority": 2,
+                "type": "cooling",
+                "title": "Hava akışını artır",
+                "detail": "Sıcaklık ve nem dengesini toparlamak için fan desteği öneriliyor.",
+                "icon": "fan-breeze",
+            }
+        )
+    if actuator.water_pump:
+        action_recommendations.append(
+            {
+                "priority": 3,
+                "type": "refill",
+                "title": "Su tankını destekle",
+                "detail": "Su seviyesi düşüşünü durdurmak için ana depoya su takviyesi yap.",
+                "icon": "water-refill",
+            }
+        )
+    if not action_recommendations:
+        if scenario == ScenarioType.DROUGHT:
+            action_recommendations.append(
+                {
+                    "priority": 1,
+                    "type": "watering",
+                    "title": "Sulamayı başlat",
+                    "detail": "Kuraklık riskinde nemi toparlamak için sulama öncelikli olmalı.",
+                    "icon": "watering-plant",
+                }
+            )
+        elif scenario == ScenarioType.COLD_STRESS:
+            action_recommendations.append(
+                {
+                    "priority": 1,
+                    "type": "warming",
+                    "title": "Ortamı ılımlaştır",
+                    "detail": "Soğuk stresini azaltmak için ısı kaybını düşür ve ortamı stabilize et.",
+                    "icon": "cold-plant",
+                }
+            )
+        elif scenario == ScenarioType.HARDWARE_FAULT:
+            action_recommendations.append(
+                {
+                    "priority": 1,
+                    "type": "maintenance",
+                    "title": "Pompa hattını kontrol et",
+                    "detail": "Sensör ve pompa davranışı tutarsız; fiziksel hat/pompa arızası olabilir.",
+                    "icon": "tool-check",
+                }
+            )
+        else:
+            action_recommendations.append(
+                {
+                    "priority": 1,
+                    "type": "monitor",
+                    "title": "Mevcut düzeni koru",
+                    "detail": "Şu an kritik müdahale gerekmiyor, rutin izleme yeterli.",
+                    "icon": "healthy-leaf",
+                }
+            )
+
+    action_recommendations.sort(key=lambda x: x["priority"])
+    actions = [_friendly_actuator_name(k) for k, v in actuator.to_dict().items() if v]
+    if not actions:
+        actions = ["Şimdilik cihaz değişimi gerekmiyor"]
+
+    predicted = optimization.get("predicted_next_state", {}) if optimization else {}
+    predicted_state = {
+        "temperature": round(float(predicted.get("temperature", reading.temperature)), 1),
+        "humidity": round(float(predicted.get("humidity", reading.humidity)), 1),
+        "water_level": round(float(predicted.get("water_level", reading.water_level)), 1),
+    }
+
+    return {
+        "status_label": status_map.get(alert, alert.value),
+        "scenario_label": scenario_map.get(scenario, scenario.value),
+        "actions": actions,
+        "action_recommendations": action_recommendations,
+        "highlight_action": action_recommendations[0],
+        "plant_label": PLANT_PROFILES.get(reading.plant_type, PLANT_PROFILES["lettuce"])["label"],
+        "plant_type": reading.plant_type,
+        "predicted_state": predicted_state,
+        "summary": comment,
+    }
+
+
+def evaluate_what_if(
+    reading: SensorReading,
+    fan: bool,
+    watering_pump: bool,
+    water_pump: bool,
+) -> dict:
+    cmd = ActuatorCommand(fan=fan, watering_pump=watering_pump, water_pump=water_pump)
+    predicted_state = _estimate_next_state(reading, cmd)
+
+    # Tek adım yerine kısa ufuklu projeksiyon: kullanıcı etkisini birkaç döngü sonrası görsün.
+    horizon_steps = 8
+    projected = {
+        "temperature": reading.temperature,
+        "humidity": reading.humidity,
+        "water_level": reading.water_level,
+    }
+    for _ in range(horizon_steps):
+        projected = _estimate_next_state(
+            SensorReading(
+                timestamp=reading.timestamp,
+                temperature=projected["temperature"],
+                humidity=projected["humidity"],
+                water_level=projected["water_level"],
+                nitrogen=reading.nitrogen,
+                phosphorus=reading.phosphorus,
+                potassium=reading.potassium,
+                plant_type=reading.plant_type,
+                fan_on=0,
+                watering_pump_on=0,
+                water_pump_on=0,
+            ),
+            cmd,
+        )
+
+    future_reading = SensorReading(
+        timestamp=reading.timestamp,
+        temperature=projected["temperature"],
+        humidity=projected["humidity"],
+        water_level=projected["water_level"],
+        nitrogen=reading.nitrogen,
+        phosphorus=reading.phosphorus,
+        potassium=reading.potassium,
+        plant_type=reading.plant_type,
+        # What-if'te arıza dedeksiyonu değil, çevresel etkiler simüle edilir.
+        fan_on=0,
+        watering_pump_on=0,
+        water_pump_on=0,
+    )
+    future_alert, future_scenario, _, _, _ = run_rule_based(future_reading)
+    warnings = _what_if_warnings(reading, cmd)
+
+    return {
+        "selected_command": cmd.to_dict(),
+        "predicted_state": {
+            "temperature": round(predicted_state["temperature"], 1),
+            "humidity": round(predicted_state["humidity"], 1),
+            "water_level": round(predicted_state["water_level"], 1),
+        },
+        "projected_state": {
+            "temperature": round(projected["temperature"], 1),
+            "humidity": round(projected["humidity"], 1),
+            "water_level": round(projected["water_level"], 1),
+        },
+        "projection_steps": horizon_steps,
+        "expected_alert_level": future_alert.value,
+        "expected_scenario": future_scenario.value,
+        "warnings": warnings,
+        "summary": build_decision_comment(
+            reading=reading,
+            alert=future_alert,
+            scenario=future_scenario,
+            flags=[],
+            actuator=cmd,
+            trend=None,
+            optimization={
+                "predicted_next_state": predicted_state,
+            },
+        ),
+    }
+
 
 class HybridDecisionEngine:
-    """
-    3 katmanlı karar motoru orkestratörü.
-
-    Kullanım:
-        engine = HybridDecisionEngine(gemini_api_key="...")
-        engine.fit(historical_df)
-        result = engine.decide(sensor_reading)
-        print(result.to_json())
-    """
-
-    def __init__(self, gemini_api_key: Optional[str] = None, use_xai: bool = True):
-        self.gemini_api_key = gemini_api_key or os.getenv("GEMINI_API_KEY", "")
-        self.use_xai = use_xai and bool(self.gemini_api_key)
+    def __init__(self):
         self.ml_engine = MLEngine(n_clusters=4)
         self._history: list[SensorReading] = []
 
     def fit(self, df: pd.DataFrame):
-        """
-        Geçmiş veriyle ML katmanını eğit.
-        df kolonları: temperature, humidity, water_level (zorunlu)
-        """
-        # Kolon ismi uyumluluğu (orijinal datasetteki 'tempreature' typo'su)
         col_map = {"tempreature": "temperature"}
         df = df.rename(columns=col_map)
 
@@ -463,31 +804,30 @@ class HybridDecisionEngine:
         self.ml_engine.fit(df.dropna(subset=required))
         print(f"[ML] Model {len(df)} satır veriyle eğitildi. Kümeler: {self.ml_engine.cluster_labels}")
 
-    def decide(self, reading: SensorReading, xai_mode: bool = True) -> DecisionResult:
-        """
-        Senkron karar ver (Gemini XAI olmadan).
-        Dashboard için hızlı yanıt (< 50ms).
-        """
+    def decide(self, reading: SensorReading) -> DecisionResult:
         self._history.append(reading)
 
-        # PHASE 1: Rule-Based
         alert, scenario, actuator, flags, confidence = run_rule_based(reading)
-
-        # PHASE 2: ML
         ml_result = self.ml_engine.predict(reading)
+        optimization = optimize_actuator_plan(reading, actuator, alert, scenario)
 
-        # Literatür seçimi
         literature = LITERATURE.get(scenario.value.lower(), LITERATURE["normal"])
-
-        # XAI prompt hazırla (asenkron çağrı için)
-        xai_prompt = build_gemini_prompt(
+        decision_comment = build_decision_comment(
             reading=reading,
             alert=alert,
             scenario=scenario,
             flags=flags,
             actuator=actuator,
-            trend=ml_result.get("trend_30min"),
-            literature=literature,
+            trend=ml_result.get("trend"),
+            optimization=optimization,
+        )
+        user_view = build_user_view(
+            reading=reading,
+            alert=alert,
+            scenario=scenario,
+            actuator=actuator,
+            optimization=optimization,
+            comment=decision_comment,
         )
 
         return DecisionResult(
@@ -506,30 +846,18 @@ class HybridDecisionEngine:
             rule_based_flags=flags,
             ml_cluster=ml_result.get("cluster"),
             ml_trend=ml_result.get("trend"),
-            xai_explanation=None,   # async decide_with_xai() ile doldurulur
+            optimization=optimization,
+            decision_comment=decision_comment,
+            user_view=user_view,
             literature_refs=literature,
             user_action_required=(alert in [AlertLevel.CRITICAL, AlertLevel.EMERGENCY]),
             confidence_score=confidence,
-        ), xai_prompt  # prompt'u FastAPI'ye bırak, orada async çağır
+        )
 
-    async def decide_with_xai(self, reading: SensorReading) -> DecisionResult:
-        """XAI dahil tam karar (async). Dashboard detay paneli için."""
-        result, xai_prompt = self.decide(reading)
-        if self.use_xai:
-            result.xai_explanation = await call_gemini_xai(xai_prompt, self.gemini_api_key)
-        else:
-            result.xai_explanation = "[XAI devre dışı — GEMINI_API_KEY ayarlanmamış]"
-        return result
-
-
-# ──────────────────────────────────────────────
-# 6. VERİ YÜKLEYICI (Simülasyon & Test)
-# ──────────────────────────────────────────────
 
 def load_dataset(path: str) -> tuple[pd.DataFrame, list[SensorReading]]:
-    """Excel/CSV dataseti SensorReading listesine dönüştür."""
     df = pd.read_excel(path) if path.endswith(".xlsx") else pd.read_csv(path)
-    df = df.rename(columns={"tempreature": "temperature"})  # typo düzeltme
+    df = df.rename(columns={"tempreature": "temperature"})
 
     readings = []
     for _, row in df.iterrows():
@@ -541,98 +869,10 @@ def load_dataset(path: str) -> tuple[pd.DataFrame, list[SensorReading]]:
             nitrogen=int(row.get("N", 150)),
             phosphorus=int(row.get("P", 50)),
             potassium=int(row.get("K", 200)),
+            plant_type="lettuce",
             fan_on=int(row.get("Fan_actuator_ON", 0)),
             watering_pump_on=int(row.get("Watering_plant_pump_ON", 0)),
             water_pump_on=int(row.get("Water_pump_actuator_ON", 0)),
         )
         readings.append(r)
     return df, readings
-
-
-# ──────────────────────────────────────────────
-# 7. TEST — Simülasyon Çalıştırıcı
-# ──────────────────────────────────────────────
-
-if __name__ == "__main__":
-    import asyncio
-
-    print("=" * 60)
-    print("  Smart Co-Pilot — Hybrid Decision Engine TEST")
-    print("=" * 60)
-
-    # Veri yükle
-    heatwave_df, heatwave_readings = load_dataset(
-        "/mnt/user-data/uploads/synthetic_heatwave_scenario.xlsx"
-    )
-    drought_df, drought_readings = load_dataset(
-        "/mnt/user-data/uploads/synthetic_drought_scenario.xlsx"
-    )
-
-    # Combined training data
-    combined_df = pd.concat([heatwave_df, drought_df], ignore_index=True)
-    combined_df = combined_df.rename(columns={"tempreature": "temperature"})
-
-    # Engine oluştur ve eğit (XAI kapalı — API key yok)
-    engine = HybridDecisionEngine(use_xai=False)
-    engine.fit(combined_df)
-
-    print("\n" + "─" * 60)
-    print("SENARYO 1: HEATWAVE — İlk 3 okuma")
-    print("─" * 60)
-    for reading in heatwave_readings[:3]:
-        result, _ = engine.decide(reading)
-        print(f"\n[{result.timestamp}]")
-        print(f"  Alert   : {result.alert_level.value}")
-        print(f"  Senaryo : {result.scenario.value}")
-        print(f"  Cluster : {result.ml_cluster} — {engine.ml_engine.cluster_labels.get(result.ml_cluster, '?')}")
-        print(f"  Aktüatör: {result.actuator_command}")
-        print(f"  Flags   : {result.rule_based_flags}")
-        print(f"  Trend   : {result.ml_trend}")
-        print(f"  Güven   : {result.confidence_score}")
-
-    print("\n" + "─" * 60)
-    print("SENARYO 2: DROUGHT — İlk 3 okuma")
-    print("─" * 60)
-    engine2 = HybridDecisionEngine(use_xai=False)
-    engine2.fit(combined_df)
-    for reading in drought_readings[:3]:
-        result, _ = engine2.decide(reading)
-        print(f"\n[{result.timestamp}]")
-        print(f"  Alert   : {result.alert_level.value}")
-        print(f"  Senaryo : {result.scenario.value}")
-        print(f"  Cluster : {result.ml_cluster} — {engine2.ml_engine.cluster_labels.get(result.ml_cluster, '?')}")
-        print(f"  Aktüatör: {result.actuator_command}")
-        print(f"  Flags   : {result.rule_based_flags}")
-        print(f"  Trend   : {result.ml_trend}")
-
-    print("\n" + "─" * 60)
-    print("SENARYO 3: DONANIM ARIZASI")
-    print("─" * 60)
-    fault_reading = SensorReading(
-        timestamp=datetime.now().isoformat(),
-        temperature=28.0,
-        humidity=18.0,       # nem düşük
-        water_level=65.0,
-        nitrogen=150,
-        phosphorus=50,
-        potassium=200,
-        fan_on=0,
-        watering_pump_on=1,  # pompa açık ama nem artmıyor
-        water_pump_on=0,
-    )
-    engine3 = HybridDecisionEngine(use_xai=False)
-    engine3.fit(combined_df)
-    result, prompt = engine3.decide(fault_reading)
-    print(f"\n  Alert   : {result.alert_level.value}")
-    print(f"  Senaryo : {result.scenario.value}")
-    print(f"  Aktüatör: {result.actuator_command}")
-    print(f"  Flags   : {result.rule_based_flags}")
-    print(f"  Güven   : {result.confidence_score}")
-    print(f"\n  [XAI PROMPT ÖRNEK — Gemini'ye gidecek metin]")
-    print(f"  {prompt[:300]}...")
-
-    print("\n" + "─" * 60)
-    print("TAM JSON ÇIKTI ÖRNEĞİ (FastAPI response):")
-    print("─" * 60)
-    result.xai_explanation = "[Gemini XAI çıktısı buraya gelecek]"
-    print(result.to_json())

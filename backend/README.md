@@ -3,7 +3,7 @@
 ## Kurulum
 
 ```bash
-pip install fastapi uvicorn scikit-learn pandas openpyxl google-generativeai
+pip install fastapi uvicorn scikit-learn pandas openpyxl google-auth requests
 ```
 
 ## Proje Yapısı
@@ -22,10 +22,7 @@ decision_engine/
 
 ```bash
 # 1. Veri dosyalarını data/ klasörüne koy
-# 2. (İsteğe bağlı) Gemini API key'ini ayarla
-export GEMINI_API_KEY="your-key-here"
-
-# 3. Sunucuyu başlat
+# 2. Sunucuyu başlat
 uvicorn api:app --reload --port 8000
 ```
 
@@ -34,10 +31,41 @@ uvicorn api:app --reload --port 8000
 | Method | Endpoint        | Açıklama                            | Süre     |
 |--------|----------------|-------------------------------------|----------|
 | GET    | /health        | Servis ve model durumu              | < 10ms   |
+| GET    | /current       | Son sensör verisine göre anlık durum| < 10ms   |
 | GET    | /thresholds    | Bitki eşik değerleri + literatür    | < 10ms   |
-| POST   | /decide        | Hızlı karar (XAI yok)              | < 50ms   |
-| POST   | /decide/xai    | Tam karar + Gemini açıklaması       | ~1-3 sn  |
+| POST   | /ingest        | Sensör verisini sisteme işler       | < 50ms   |
+| POST   | /decide        | Manuel test amaçlı hızlı karar      | < 50ms   |
+| POST   | /what-if       | Ayar değiştirirsem ne olur tahmini  | < 50ms   |
+| POST   | /ai/explain    | Gemini destekli açıklama üretir     | ~1-3 sn  |
+| POST   | /demo/next     | Demo sensör satırı içeri akıtır      | < 50ms   |
+| GET    | /air-quality/openaq | OpenAQ hava kalitesi çekmeyi dener | ~1 sn |
 | POST   | /simulate      | Dataset simülasyonu                 | < 200ms  |
+
+## Gemini Açıklama Katmanı
+
+- Ana karar motoru `rule-based + K-Means + optimization` olarak kalır.
+- Gemini sadece mevcut karar için doğal dil açıklaması üretir.
+- Vertex AI bilgileri tanımlıysa sistem Gemini'ye Vertex üzerinden gider.
+- `GEMINI_API_KEY` veya `GOOGLE_API_KEY` tanımlıysa resmi Gemini API çağrılır.
+- Anahtar yoksa veya erişim başarısızsa sistem yerel fallback özet gösterir.
+
+## Vertex AI ile Kullanım
+
+Vertex AI tercih edilecekse ortam değişkenleri:
+
+```bash
+export VERTEX_AI_PROJECT="your-gcp-project-id"
+export VERTEX_AI_LOCATION="global"
+export VERTEX_GEMINI_MODEL="gemini-2.5-flash"
+```
+
+Kimlik doğrulama için Application Default Credentials kullanılır. Örnek:
+
+```bash
+gcloud auth application-default login
+```
+
+Bu durumda `/ai/explain` ve `/ai/ask` endpoint'leri Gemini yanıtlarını Vertex AI üzerinden üretir.
 
 ## Örnek İstek (Next.js / cURL)
 
@@ -75,8 +103,8 @@ Phase 1: Rule-Based Engine    ← Deterministik, %100 güven, < 1ms
 Phase 2: ML Engine            ← K-Means cluster + Trend regresyon
      │ (cluster_id, trend_30min)
      ▼
-Phase 3: Gemini XAI           ← Doğal dil açıklama + literatür
-     │ (xai_explanation)
+Phase 3: Optimization Layer   ← Objective function minimizasyonu
+     │ (recommended_command, objective_score)
      ▼
 DecisionResult JSON           ← FastAPI → Next.js Dashboard
 ```
