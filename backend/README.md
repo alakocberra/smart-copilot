@@ -26,6 +26,58 @@ decision_engine/
 uvicorn api:app --reload --port 8000
 ```
 
+## Cloud Run Deployment
+
+Bu servis Cloud Run'a tek parça backend olarak deploy edilebilir. Dashboard aynı FastAPI servisi içinden sunulur.
+
+Gerekli ortam değişkenleri:
+
+```bash
+export GOOGLE_CLOUD_PROJECT="your-gcp-project-id"
+export REGION="europe-west1"
+export SERVICE_NAME="smart-copilot-dashboard"
+```
+
+Deploy komutu:
+
+```bash
+gcloud run deploy "$SERVICE_NAME" \
+  --source . \
+  --project "$GOOGLE_CLOUD_PROJECT" \
+  --region "$REGION" \
+  --allow-unauthenticated
+```
+
+Vertex AI kullanılacaksa ayrıca:
+
+```bash
+gcloud run services update "$SERVICE_NAME" \
+  --project "$GOOGLE_CLOUD_PROJECT" \
+  --region "$REGION" \
+  --update-env-vars VERTEX_AI_PROJECT="$GOOGLE_CLOUD_PROJECT",VERTEX_AI_LOCATION="global",VERTEX_GEMINI_MODEL="gemini-2.5-flash"
+```
+
+Not:
+
+- Cloud Run üzerinde `GOOGLE_APPLICATION_CREDENTIALS` vermek yerine servis hesabına uygun IAM rolü atanması önerilir.
+- Dashboard ana sayfası deploy sonrası servis URL'sinde `/` altında açılır.
+
+## Render Deployment
+
+Render üzerinde en pratik kurulum `render.yaml` ile yapılır.
+
+Repo kökünde bulunan `render.yaml` şu ayarlarla gelir:
+
+- `rootDir: backend`
+- `buildCommand: pip install -r requirements.txt`
+- `startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT`
+
+Notlar:
+
+- Render tarafında `Vertex AI` yerine doğrudan `GEMINI_API_KEY` kullanmak daha pratiktir.
+- Eğer hiçbir AI anahtarı girilmezse dashboard yine açılır; AI bölümü fallback açıklama ile çalışır.
+- Dashboard ve API aynı web service içinden yayınlanır.
+
 ## Endpoint'ler
 
 | Method | Endpoint        | Açıklama                            | Süre     |

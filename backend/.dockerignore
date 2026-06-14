@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.DS_Store
+.env
+.venv/
+venv/
+*.log
+dashboard.pre-apple-v1.backup.html

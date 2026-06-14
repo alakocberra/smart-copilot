@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: smart-copilot-dashboard
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: VERTEX_AI_LOCATION
+        value: global
+      - key: VERTEX_GEMINI_MODEL
+        value: gemini-2.5-flash
